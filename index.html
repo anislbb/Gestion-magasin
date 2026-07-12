@@ -216,10 +216,10 @@
         <div class="card accent-red"><div class="label">Produits en stock faible</div><div class="value" id="kpiLowStock">0</div></div>
         <div class="card"><div class="label">Capital immobilisé (stock)</div><div class="value" id="kpiCapital">0.00 DA</div></div>
       </div>
-      <div class="panel">
+      <div class="panel" style="overflow-x:auto;">
         <h2>Produits en stock faible</h2>
-        <table>
-          <thead><tr><th>Produit</th><th>Code-barres</th><th class="num">Stock</th></tr></thead>
+        <table style="min-width:520px;">
+          <thead><tr><th>Produit</th><th>Code-barres</th><th class="num">Stock</th><th>À commander</th></tr></thead>
           <tbody id="lowStockTable"></tbody>
         </table>
       </div>
@@ -270,9 +270,9 @@
         <button class="btn btn-primary" id="openAddProduct">+ Nouveau produit</button>
       </div>
       <div class="panel" style="overflow-x:auto;">
-        <table style="min-width:640px;">
+        <table style="min-width:740px;">
           <thead><tr>
-            <th>Produit</th><th>Catégorie</th><th>Code-barres</th>
+            <th>Produit</th><th>Catégorie</th><th>Format</th><th>Code-barres</th>
             <th class="num">Achat</th><th class="num">Vente</th><th class="num">Stock</th><th></th>
           </tr></thead>
           <tbody id="productsTable"></tbody>
@@ -326,8 +326,13 @@
       <p class="subtitle">Toutes les données sont stockées localement dans ce navigateur. Exportez régulièrement pour ne rien perdre.</p>
       <div class="panel">
         <h2>Exporter</h2>
-        <p class="muted">Télécharge un fichier .json contenant tous les produits et toutes les ventes.</p>
-        <button class="btn btn-primary" id="exportBtn">Exporter les données</button>
+        <p class="muted">Télécharge un fichier .json contenant tous les produits et toutes les ventes. À utiliser pour les sauvegardes / restaurations.</p>
+        <button class="btn btn-primary" id="exportBtn">Exporter les données (.json)</button>
+      </div>
+      <div class="panel">
+        <h2>Exporter en Excel</h2>
+        <p class="muted">Télécharge un fichier .xlsx (Produits, Catégories, Ventes) pratique à consulter ou partager. Ce fichier n'est pas destiné à être réimporté — utilisez l'export .json ci-dessus pour les sauvegardes.</p>
+        <button class="btn btn-primary" id="exportExcelBtn">Télécharger en Excel (.xlsx)</button>
       </div>
       <div class="panel">
         <h2>Importer</h2>
@@ -345,7 +350,10 @@
     <input type="hidden" id="pfOriginalBarcode">
     <div class="field">
       <label>Code-barres</label>
-      <input type="text" id="pfBarcode" inputmode="numeric">
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="pfBarcode" inputmode="numeric" style="flex:1; width:auto;">
+        <button type="button" class="btn btn-sm" id="pfScanBtn" style="white-space:nowrap; flex-shrink:0;">📷 Scanner</button>
+      </div>
     </div>
     <div class="field">
       <label>Nom du produit</label>
@@ -353,8 +361,8 @@
     </div>
     <div class="field">
       <label>Catégorie</label>
-      <input type="text" id="pfCategory" list="categoryList" placeholder="ex. Boissons, Hygiène, Épicerie...">
-      <datalist id="categoryList"></datalist>
+      <select id="pfCategorySelect"></select>
+      <input type="text" id="pfCategoryNew" placeholder="Nom de la nouvelle catégorie" style="display:none; margin-top:8px;">
     </div>
     <div class="grid2">
       <div class="field">
@@ -367,8 +375,24 @@
       </div>
     </div>
     <div class="field">
+      <label>Format d'achat</label>
+      <div style="display:flex; gap:18px; align-items:center; padding:4px 0;">
+        <label style="display:flex; align-items:center; gap:6px; font-weight:500; color:var(--ink); font-size:.88rem; cursor:pointer;">
+          <input type="radio" name="pfPurchaseUnit" value="unit" id="pfUnitRadio" checked> À l'unité
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; font-weight:500; color:var(--ink); font-size:.88rem; cursor:pointer;">
+          <input type="radio" name="pfPurchaseUnit" value="box" id="pfBoxRadio"> Par carton
+        </label>
+      </div>
+    </div>
+    <div class="field" id="pfUnitsPerBoxField" style="display:none;">
+      <label>Unités par carton</label>
+      <input type="number" id="pfUnitsPerBox" min="1" step="1" placeholder="ex. 24">
+    </div>
+    <div class="field">
       <label>Stock (quantité)</label>
       <input type="number" id="pfStock" step="1" min="0">
+      <footer class="hint">Toujours en unités individuelles, même si vous achetez par carton.</footer>
     </div>
     <p id="productFormError" style="color:var(--red); font-size:.85rem;"></p>
     <div class="modal-actions">
@@ -411,6 +435,7 @@
 </dialog>
 
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.15.0/firebase-app.js";
   import {
@@ -453,6 +478,18 @@
     return String(s).replace(/[&<>"']/g, function(c){
       return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c];
     });
+  }
+  function purchaseFormatLabel(p){
+    return (p.purchaseUnit === "box" && p.unitsPerBox) ? ("Carton de " + p.unitsPerBox) : "Unité";
+  }
+  // Recommends how many boxes to reorder to bring stock back above the low-stock threshold.
+  // Only applies to box-purchased products; returns null if not applicable or not currently low.
+  function reorderRecommendation(p){
+    if(p.purchaseUnit !== "box" || !p.unitsPerBox) return null;
+    var deficit = LOW_STOCK_THRESHOLD - (p.stock || 0);
+    if(deficit <= 0) return null;
+    var boxes = Math.max(1, Math.ceil(deficit / p.unitsPerBox));
+    return {boxes: boxes, units: boxes * p.unitsPerBox};
   }
 
   /* ---------------- Live data listeners ---------------- */
@@ -513,11 +550,14 @@
 
     var tbody = document.getElementById("lowStockTable");
     if(low.length === 0){
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="3">Aucun produit en stock faible</td></tr>';
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="4">Aucun produit en stock faible</td></tr>';
     } else {
       tbody.innerHTML = low.map(function(p){
+        var rec = reorderRecommendation(p);
+        var recText = rec ? (rec.boxes + " carton" + (rec.boxes > 1 ? "s" : "") + " (" + rec.units + " u.)") : "—";
         return "<tr><td>"+escapeHtml(p.name)+"</td><td>"+escapeHtml(p.barcode)+"</td>"+
-               '<td class="num stock-low">'+p.stock+"</td></tr>";
+               '<td class="num stock-low">'+p.stock+"</td>"+
+               "<td>"+escapeHtml(recText)+"</td></tr>";
       }).join("");
     }
   }
@@ -703,12 +743,22 @@
   var html5QrScanner = null;
   var lastCameraCode = "";
   var lastCameraTime = 0;
+  var cameraMode = "pos"; // "pos" = add to cart continuously, "product" = fill barcode field once
 
   function onCameraDecoded(decodedText){
     var now = Date.now();
     if(decodedText === lastCameraCode && (now - lastCameraTime) < 1500) return;
     lastCameraCode = decodedText;
     lastCameraTime = now;
+
+    if(cameraMode === "product"){
+      document.getElementById("pfBarcode").value = decodedText;
+      stopCameraScanner();
+      cameraDialog.close();
+      document.getElementById("pfName").focus();
+      return;
+    }
+
     handleScan(decodedText);
     var matched = productsCache.find(function(p){ return p.barcode === decodedText; });
     cameraStatusEl.textContent = matched ? ("✓ Ajouté : " + matched.name) : ("Code inconnu : " + decodedText);
@@ -774,11 +824,18 @@
     }
   }
 
-  document.getElementById("posCameraBtn").addEventListener("click", startCameraScanner);
+  document.getElementById("posCameraBtn").addEventListener("click", function(){
+    cameraMode = "pos";
+    startCameraScanner();
+  });
+  document.getElementById("pfScanBtn").addEventListener("click", function(){
+    cameraMode = "product";
+    startCameraScanner();
+  });
   document.getElementById("cameraClose").addEventListener("click", function(){
     stopCameraScanner();
     cameraDialog.close();
-    focusScanInput();
+    if(cameraMode === "pos") focusScanInput();
   });
   cameraDialog.addEventListener("close", stopCameraScanner);
 
@@ -858,7 +915,7 @@
       });
     var tbody = document.getElementById("productsTable");
     if(list.length === 0){
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="7">Aucun produit</td></tr>';
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="8">Aucun produit</td></tr>';
       return;
     }
     tbody.innerHTML = list.map(function(p){
@@ -866,6 +923,7 @@
       return "<tr>" +
         "<td>"+escapeHtml(p.name)+"</td>" +
         "<td>"+escapeHtml(p.category || "Sans catégorie")+"</td>" +
+        "<td>"+escapeHtml(purchaseFormatLabel(p))+"</td>" +
         "<td>"+escapeHtml(p.barcode)+"</td>" +
         '<td class="num">'+money(p.buyPrice)+"</td>" +
         '<td class="num">'+money(p.sellPrice)+"</td>" +
@@ -896,33 +954,72 @@
     }
   });
 
-  function populateCategoryDatalist(){
+  function populateCategorySelect(selectedCategory){
+    var select = document.getElementById("pfCategorySelect");
     var cats = Array.from(new Set(productsCache.map(function(p){ return p.category || "Sans catégorie"; }))).sort();
-    document.getElementById("categoryList").innerHTML = cats.map(function(c){ return '<option value="'+escapeHtml(c)+'">'; }).join("");
+    if(selectedCategory && cats.indexOf(selectedCategory) === -1){
+      cats.push(selectedCategory);
+      cats.sort();
+    }
+    var options = cats.map(function(c){ return '<option value="'+escapeHtml(c)+'">'+escapeHtml(c)+'</option>'; });
+    options.push('<option value="__new__">+ Nouvelle catégorie...</option>');
+    select.innerHTML = options.join("");
+    select.value = (selectedCategory && cats.indexOf(selectedCategory) !== -1) ? selectedCategory : (cats.length ? cats[0] : "__new__");
+    updateCategoryNewFieldVisibility();
   }
+
+  function updateCategoryNewFieldVisibility(){
+    var select = document.getElementById("pfCategorySelect");
+    var newField = document.getElementById("pfCategoryNew");
+    if(select.value === "__new__"){
+      newField.style.display = "block";
+    } else {
+      newField.style.display = "none";
+      newField.value = "";
+    }
+  }
+
+  document.getElementById("pfCategorySelect").addEventListener("change", function(){
+    updateCategoryNewFieldVisibility();
+    if(this.value === "__new__") document.getElementById("pfCategoryNew").focus();
+  });
+
+  function updatePurchaseUnitFieldVisibility(){
+    var isBox = document.getElementById("pfBoxRadio").checked;
+    document.getElementById("pfUnitsPerBoxField").style.display = isBox ? "block" : "none";
+  }
+  document.getElementById("pfUnitRadio").addEventListener("change", updatePurchaseUnitFieldVisibility);
+  document.getElementById("pfBoxRadio").addEventListener("change", updatePurchaseUnitFieldVisibility);
 
   function openProductDialog(product, prefillBarcode){
     document.getElementById("productFormError").textContent = "";
-    populateCategoryDatalist();
     if(product){
       document.getElementById("productDialogTitle").textContent = "Modifier le produit";
       document.getElementById("pfOriginalBarcode").value = product.barcode;
       document.getElementById("pfBarcode").value = product.barcode;
       document.getElementById("pfName").value = product.name;
-      document.getElementById("pfCategory").value = product.category || "";
+      populateCategorySelect(product.category || "Sans catégorie");
       document.getElementById("pfBuy").value = product.buyPrice;
       document.getElementById("pfSell").value = product.sellPrice;
+      var isBox = product.purchaseUnit === "box";
+      document.getElementById("pfBoxRadio").checked = isBox;
+      document.getElementById("pfUnitRadio").checked = !isBox;
+      document.getElementById("pfUnitsPerBox").value = product.unitsPerBox || "";
       document.getElementById("pfStock").value = product.stock;
     } else {
       document.getElementById("productDialogTitle").textContent = "Nouveau produit";
       document.getElementById("pfOriginalBarcode").value = "";
       document.getElementById("pfBarcode").value = prefillBarcode || "";
       document.getElementById("pfName").value = "";
-      document.getElementById("pfCategory").value = "";
+      populateCategorySelect(null);
       document.getElementById("pfBuy").value = "";
       document.getElementById("pfSell").value = "";
+      document.getElementById("pfUnitRadio").checked = true;
+      document.getElementById("pfBoxRadio").checked = false;
+      document.getElementById("pfUnitsPerBox").value = "";
       document.getElementById("pfStock").value = "0";
     }
+    updatePurchaseUnitFieldVisibility();
     productDialog.showModal();
     setTimeout(function(){
       var nameField = document.getElementById("pfName");
@@ -940,7 +1037,10 @@
     var name = document.getElementById("pfName").value.trim();
     var buy = parseFloat(document.getElementById("pfBuy").value);
     var sell = parseFloat(document.getElementById("pfSell").value);
-    var category = document.getElementById("pfCategory").value.trim() || "Sans catégorie";
+    var categorySelectVal = document.getElementById("pfCategorySelect").value;
+    var category = categorySelectVal === "__new__"
+      ? (document.getElementById("pfCategoryNew").value.trim() || "Sans catégorie")
+      : categorySelectVal;
     var stock = parseInt(document.getElementById("pfStock").value, 10);
     var errEl = document.getElementById("productFormError");
 
@@ -948,7 +1048,18 @@
       errEl.textContent = "Merci de remplir tous les champs correctement.";
       return;
     }
-    var productData = {name:name, category:category, buyPrice:buy, sellPrice:sell, stock:stock};
+
+    var purchaseUnit = document.getElementById("pfBoxRadio").checked ? "box" : "unit";
+    var unitsPerBox = null;
+    if(purchaseUnit === "box"){
+      unitsPerBox = parseInt(document.getElementById("pfUnitsPerBox").value, 10);
+      if(!unitsPerBox || unitsPerBox < 1){
+        errEl.textContent = "Merci d'indiquer un nombre d'unités par carton valide.";
+        return;
+      }
+    }
+
+    var productData = {name:name, category:category, buyPrice:buy, sellPrice:sell, stock:stock, purchaseUnit:purchaseUnit, unitsPerBox:unitsPerBox};
 
     var savePromise;
     if(original && original === barcode){
@@ -1072,6 +1183,83 @@
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  });
+
+  document.getElementById("exportExcelBtn").addEventListener("click", function(){
+    if(typeof XLSX === "undefined"){
+      alert("La bibliothèque Excel n'a pas pu se charger (vérifiez la connexion internet).");
+      return;
+    }
+    var wb = XLSX.utils.book_new();
+    var round2 = function(n){ return Math.round((n||0)*100)/100; };
+
+    var produitsRows = productsCache.slice().sort(function(a,b){ return a.name.localeCompare(b.name); }).map(function(p){
+      var rec = reorderRecommendation(p);
+      return {
+        "Nom": p.name,
+        "Catégorie": p.category || "Sans catégorie",
+        "Code-barres": p.barcode,
+        "Format": purchaseFormatLabel(p),
+        "Prix Achat (DA)": p.buyPrice,
+        "Prix Vente (DA)": p.sellPrice,
+        "Stock": p.stock,
+        "Valeur Stock (DA)": round2((p.buyPrice||0)*(p.stock||0)),
+        "Cartons à commander": rec ? rec.boxes : ""
+      };
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(produitsRows), "Produits");
+
+    var byCat = {};
+    function bucket(name){
+      var key = name || "Sans catégorie";
+      if(!byCat[key]) byCat[key] = {capital:0, count:0, profit:0};
+      return byCat[key];
+    }
+    productsCache.forEach(function(p){
+      var b = bucket(p.category);
+      b.capital += (p.buyPrice||0) * (p.stock||0);
+      b.count += 1;
+    });
+    salesCache.forEach(function(s){
+      (s.items||[]).forEach(function(i){
+        var b = bucket(i.category);
+        b.profit += (i.sellPrice - i.buyPrice) * i.qty;
+      });
+    });
+    var catRows = Object.keys(byCat).sort().map(function(n){
+      var c = byCat[n];
+      return {"Catégorie": n, "Nombre de produits": c.count, "Capital (DA)": round2(c.capital), "Bénéfice réalisé (DA)": round2(c.profit)};
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(catRows), "Catégories");
+
+    var sortedSales = salesCache.slice().sort(function(a,b){ return (a.date||"").localeCompare(b.date||""); });
+    var ventesResume = sortedSales.map(function(s){
+      return {
+        "Date": new Date(s.date).toLocaleString("fr-FR"),
+        "Nb Articles": (s.items||[]).reduce(function(a,i){ return a+i.qty; }, 0),
+        "Total (DA)": s.total, "Bénéfice (DA)": s.profit, "Reçu (DA)": s.received, "Monnaie (DA)": s.change
+      };
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ventesResume), "Ventes (résumé)");
+
+    var ventesDetail = [];
+    sortedSales.forEach(function(s){
+      (s.items||[]).forEach(function(i){
+        ventesDetail.push({
+          "Date": new Date(s.date).toLocaleString("fr-FR"),
+          "Produit": i.name,
+          "Catégorie": i.category || "Sans catégorie",
+          "Quantité": i.qty,
+          "Prix Vente Unitaire (DA)": i.sellPrice,
+          "Prix Achat Unitaire (DA)": i.buyPrice,
+          "Total Ligne (DA)": round2(i.sellPrice*i.qty),
+          "Bénéfice Ligne (DA)": round2((i.sellPrice-i.buyPrice)*i.qty)
+        });
+      });
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(ventesDetail), "Ventes (détail)");
+
+    XLSX.writeFile(wb, "gestion-magasin-" + todayStr() + ".xlsx");
   });
 
   function chunk(arr, size){
