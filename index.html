@@ -312,9 +312,13 @@
         <div class="card accent-amber"><div class="label">Total bénéfice</div><div class="value" id="histTotalProfit">0.00 DA</div></div>
         <div class="card"><div class="label">Transactions</div><div class="value" id="histCount">0</div></div>
       </div>
-      <div class="panel">
-        <table>
-          <thead><tr><th>Date</th><th>Articles</th><th class="num">Total</th><th class="num">Bénéfice</th></tr></thead>
+      <div id="histBulkBar" style="display:none; align-items:center; gap:12px; margin-bottom:14px;">
+        <span id="histSelectedCount" style="font-size:.88rem; color:var(--ink-soft);"></span>
+        <button class="btn btn-sm btn-danger" id="histBulkDelete">Supprimer la sélection</button>
+      </div>
+      <div class="panel" style="overflow-x:auto;">
+        <table style="min-width:560px;">
+          <thead><tr><th style="width:36px;"><input type="checkbox" id="histSelectAll"></th><th>Date</th><th>Articles</th><th class="num">Total</th><th class="num">Bénéfice</th><th></th></tr></thead>
           <tbody id="historyTable"></tbody>
         </table>
       </div>
@@ -465,6 +469,7 @@
   var currentProductFilter = "";
   var currentHistFrom = "";
   var currentHistTo = "";
+  var selectedSaleIds = new Set();
 
   /* ---------------- Utilities ---------------- */
   function money(n){
@@ -1101,24 +1106,119 @@
 
     var tbody = document.getElementById("historyTable");
     if(sales.length === 0){
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="4">Aucune vente sur cette période</td></tr>';
+      tbody.innerHTML = '<tr class="empty-row"><td colspan="6">Aucune vente sur cette période</td></tr>';
+      document.getElementById("histSelectAll").checked = false;
+      updateHistBulkBar();
       return;
     }
     tbody.innerHTML = sales.map(function(s){
       var d = new Date(s.date);
       var itemsSummary = (s.items||[]).map(function(i){ return i.qty+"× "+i.name; }).join(", ");
+      var checked = selectedSaleIds.has(s.id) ? "checked" : "";
       return "<tr>" +
+        '<td><input type="checkbox" class="hist-row-check" data-id="'+escapeHtml(s.id)+'" '+checked+'></td>' +
         "<td>"+d.toLocaleString("fr-FR")+"</td>" +
         "<td>"+escapeHtml(itemsSummary)+"</td>" +
         '<td class="num">'+money(s.total)+"</td>" +
         '<td class="num">'+money(s.profit)+"</td>" +
+        '<td><button class="btn btn-sm btn-danger" data-delsale="'+escapeHtml(s.id)+'">Supprimer</button></td>' +
       "</tr>";
     }).join("");
+    document.getElementById("histSelectAll").checked = sales.every(function(s){ return selectedSaleIds.has(s.id); });
+    updateHistBulkBar();
   }
+
+  function updateHistBulkBar(){
+    var bar = document.getElementById("histBulkBar");
+    var count = selectedSaleIds.size;
+    document.getElementById("histSelectedCount").textContent = count + " sélectionné(s)";
+    bar.style.display = count > 0 ? "flex" : "none";
+  }
+
+  // Restores stock for every item across the given sales, then deletes those sales — all in one transaction.
+  function deleteSalesAndRestoreStock(saleIds){
+    var salesToDelete = saleIds.map(function(id){ return salesCache.find(function(s){ return s.id === id; }); }).filter(Boolean);
+    if(salesToDelete.length === 0) return Promise.resolve();
+
+    var restoreMap = {};
+    salesToDelete.forEach(function(s){
+      (s.items||[]).forEach(function(i){
+        restoreMap[i.barcode] = (restoreMap[i.barcode]||0) + i.qty;
+      });
+    });
+    var barcodes = Object.keys(restoreMap);
+
+    return runTransaction(db, function(transaction){
+      var refs = barcodes.map(function(bc){ return doc(db, "products", bc); });
+      return Promise.all(refs.map(function(ref){ return transaction.get(ref); })).then(function(snaps){
+        barcodes.forEach(function(bc, idx){
+          var snap = snaps[idx];
+          if(snap.exists()){
+            transaction.update(refs[idx], {stock: (snap.data().stock||0) + restoreMap[bc]});
+          }
+        });
+        salesToDelete.forEach(function(s){
+          transaction.delete(doc(db, "sales", s.id));
+        });
+      });
+    });
+  }
+
+  document.getElementById("historyTable").addEventListener("click", function(e){
+    var btn = e.target.closest("button[data-delsale]");
+    if(!btn) return;
+    var saleId = btn.dataset.delsale;
+    if(!confirm("Supprimer cette vente ? Le stock des articles vendus sera remis en stock. Cette action est irréversible.")) return;
+
+    btn.disabled = true;
+    deleteSalesAndRestoreStock([saleId]).then(function(){
+      selectedSaleIds.delete(saleId);
+    }).catch(function(err){
+      alert("Erreur lors de la suppression : " + (err.message || err));
+      console.error(err);
+      btn.disabled = false;
+    });
+  });
+
+  document.getElementById("historyTable").addEventListener("change", function(e){
+    var cb = e.target.closest(".hist-row-check");
+    if(!cb) return;
+    if(cb.checked) selectedSaleIds.add(cb.dataset.id); else selectedSaleIds.delete(cb.dataset.id);
+    var allBoxes = document.querySelectorAll("#historyTable .hist-row-check");
+    document.getElementById("histSelectAll").checked = allBoxes.length > 0 && Array.from(allBoxes).every(function(b){ return b.checked; });
+    updateHistBulkBar();
+  });
+
+  document.getElementById("histSelectAll").addEventListener("change", function(){
+    var checked = this.checked;
+    document.querySelectorAll("#historyTable .hist-row-check").forEach(function(cb){
+      cb.checked = checked;
+      if(checked) selectedSaleIds.add(cb.dataset.id); else selectedSaleIds.delete(cb.dataset.id);
+    });
+    updateHistBulkBar();
+  });
+
+  document.getElementById("histBulkDelete").addEventListener("click", function(){
+    var ids = Array.from(selectedSaleIds);
+    if(ids.length === 0) return;
+    if(!confirm("Supprimer " + ids.length + " vente(s) sélectionnée(s) ? Le stock des articles vendus sera remis en stock. Cette action est irréversible.")) return;
+
+    var btn = this;
+    btn.disabled = true;
+    deleteSalesAndRestoreStock(ids).then(function(){
+      selectedSaleIds.clear();
+    }).catch(function(err){
+      alert("Erreur lors de la suppression : " + (err.message || err));
+      console.error(err);
+    }).finally(function(){
+      btn.disabled = false;
+    });
+  });
 
   document.getElementById("histFilter").addEventListener("click", function(){
     currentHistFrom = document.getElementById("histFrom").value;
     currentHistTo = document.getElementById("histTo").value;
+    selectedSaleIds.clear();
     applyHistoryFilter();
   });
   document.getElementById("histReset").addEventListener("click", function(){
@@ -1126,6 +1226,7 @@
     document.getElementById("histTo").value = "";
     currentHistFrom = "";
     currentHistTo = "";
+    selectedSaleIds.clear();
     applyHistoryFilter();
   });
 
